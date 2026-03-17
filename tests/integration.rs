@@ -36,8 +36,6 @@ fn drain_reader(reader: Box<dyn std::io::Read + Send>) -> std::thread::JoinHandl
 }
 
 /// Wait for child with try_wait polling + timeout.
-/// WaitForSingleObject hangs on some Windows CI environments, so we
-/// poll with try_wait() instead.
 fn wait_for_child(
     child: &mut Box<dyn xpty::Child + Send + Sync>,
     timeout: std::time::Duration,
@@ -50,10 +48,7 @@ fn wait_for_child(
             Err(e) => panic!("try_wait error: {e}"),
         }
         if start.elapsed() > timeout {
-            panic!(
-                "child did not exit within {:.0}s",
-                timeout.as_secs_f64()
-            );
+            panic!("child did not exit within {:.0}s", timeout.as_secs_f64());
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
@@ -89,10 +84,18 @@ fn test_spawn_and_wait() {
     let pair = pty.openpty(PtySize::default()).unwrap();
 
     let cmd = echo_hello();
+
+    // Get reader/writer BEFORE spawn — on Windows, ConPTY needs the
+    // input pipe to be closed for the child to proceed to exit.
+    let reader = pair.master.try_clone_reader().unwrap();
+    let writer = pair.master.take_writer().unwrap();
+
     let mut child = pair.slave.spawn_command(cmd).unwrap();
     drop(pair.slave);
 
-    let reader = pair.master.try_clone_reader().unwrap();
+    // Close the writer (input pipe) — unblocks ConPTY output processing.
+    drop(writer);
+
     let _drain = drain_reader(reader);
 
     let timeout = std::time::Duration::from_secs(30);
@@ -116,10 +119,16 @@ fn test_reader_writer() {
     let pair = pty.openpty(PtySize::default()).unwrap();
 
     let cmd = echo_hello();
+
+    let reader = pair.master.try_clone_reader().unwrap();
+    let writer = pair.master.take_writer().unwrap();
+
     let mut child = pair.slave.spawn_command(cmd).unwrap();
     drop(pair.slave);
 
-    let reader = pair.master.try_clone_reader().unwrap();
+    // Close writer to unblock ConPTY
+    drop(writer);
+
     let reader_handle = drain_reader(reader);
 
     let timeout = std::time::Duration::from_secs(30);
@@ -141,10 +150,10 @@ fn test_default_prog() {
     let cmd = CommandBuilder::new_default_prog();
     assert!(cmd.is_default_prog());
 
-    let mut child = pair.slave.spawn_command(cmd).unwrap();
-
     let reader = pair.master.try_clone_reader().unwrap();
     let _drain = drain_reader(reader);
+
+    let mut child = pair.slave.spawn_command(cmd).unwrap();
 
     xpty::ChildKiller::kill(&mut *child).ok();
     let timeout = std::time::Duration::from_secs(30);

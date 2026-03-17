@@ -165,9 +165,7 @@ impl std::future::Future for WinChild {
                     let proc = match self.proc.lock() {
                         Ok(p) => match p.try_clone() {
                             Ok(p) => p,
-                            Err(e) => {
-                                return Poll::Ready(Err(crate::Error::Io(IoError::other(e))))
-                            }
+                            Err(e) => return Poll::Ready(Err(crate::Error::Io(IoError::other(e)))),
                         },
                         Err(e) => return Poll::Ready(Err(crate::Error::other(e.to_string()))),
                     };
@@ -180,9 +178,7 @@ impl std::future::Future for WinChild {
                     std::thread::spawn(move || {
                         // Poll with short timeouts instead of INFINITE
                         loop {
-                            let ret = unsafe {
-                                WaitForSingleObject(handle_val as RawHandle, 500)
-                            };
+                            let ret = unsafe { WaitForSingleObject(handle_val as RawHandle, 500) };
                             // WAIT_OBJECT_0 (0) = signaled, WAIT_TIMEOUT (258) = retry
                             if ret != 258 {
                                 break;
