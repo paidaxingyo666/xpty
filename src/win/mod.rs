@@ -43,7 +43,7 @@ impl WinChild {
         let proc = self
             .proc
             .lock()
-            .map_err(|e| IoError::other(e.to_string()))?;
+            .map_err(|e| IoError::new(std::io::ErrorKind::Other, e.to_string()))?;
         let res = unsafe { GetExitCodeProcess(proc.as_raw_handle(), &mut status) };
         if res != 0 {
             if status == STILL_ACTIVE {
@@ -61,7 +61,7 @@ impl WinChild {
         let proc = self
             .proc
             .lock()
-            .map_err(|e| IoError::other(e.to_string()))?;
+            .map_err(|e| IoError::new(std::io::ErrorKind::Other, e.to_string()))?;
         let res = unsafe { TerminateProcess(proc.as_raw_handle(), 1) };
         if res == 0 {
             Err(IoError::last_os_error())
@@ -125,7 +125,7 @@ impl Child for WinChild {
                 let proc = self
                     .proc
                     .lock()
-                    .map_err(|e| IoError::other(e.to_string()))?;
+                    .map_err(|e| IoError::new(std::io::ErrorKind::Other, e.to_string()))?;
                 unsafe {
                     WaitForSingleObject(proc.as_raw_handle(), 100);
                 }
@@ -165,7 +165,12 @@ impl std::future::Future for WinChild {
                     let proc = match self.proc.lock() {
                         Ok(p) => match p.try_clone() {
                             Ok(p) => p,
-                            Err(e) => return Poll::Ready(Err(crate::Error::Io(IoError::other(e)))),
+                            Err(e) => {
+                                return Poll::Ready(Err(crate::Error::Io(IoError::new(
+                                    std::io::ErrorKind::Other,
+                                    e.to_string(),
+                                ))))
+                            }
                         },
                         Err(e) => return Poll::Ready(Err(crate::Error::other(e.to_string()))),
                     };

@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "xpty"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "downcast-rs",
  "filedescriptor",

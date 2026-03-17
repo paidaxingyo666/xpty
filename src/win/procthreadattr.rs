@@ -24,8 +24,7 @@ impl ProcThreadAttributeList {
                 &mut bytes_required,
             )
         };
-        let mut data = Vec::with_capacity(bytes_required);
-        unsafe { data.set_len(bytes_required) };
+        let mut data = vec![0u8; bytes_required];
 
         let attr_ptr = data.as_mut_slice().as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
         let res = unsafe {

@@ -142,7 +142,7 @@ impl PseudoCon {
                 cwd.as_ref()
                     .map(|c| c.as_slice().as_ptr())
                     .unwrap_or(ptr::null()),
-                &mut si.StartupInfo,
+                &si.StartupInfo,
                 &mut pi,
             )
         };
