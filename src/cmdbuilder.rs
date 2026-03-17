@@ -212,6 +212,43 @@ pub struct CommandBuilder {
     #[cfg(unix)]
     pub(crate) umask: Option<libc::mode_t>,
     controlling_tty: bool,
+    /// User-supplied pre_exec hooks (unix only).
+    /// Stored separately to avoid breaking Clone/PartialEq.
+    #[cfg(unix)]
+    #[cfg_attr(feature = "serde_support", serde(skip))]
+    pub(crate) pre_exec_hooks: PreExecHooks,
+}
+
+/// Wrapper for pre_exec closures that doesn't participate in Clone/PartialEq.
+#[cfg(unix)]
+#[derive(Default)]
+pub(crate) struct PreExecHooks {
+    pub(crate) hooks: Vec<Box<dyn FnMut() -> std::result::Result<(), std::io::Error> + Send + Sync>>,
+}
+
+#[cfg(unix)]
+impl Clone for PreExecHooks {
+    fn clone(&self) -> Self {
+        // Cannot clone closures; the clone gets an empty hook list.
+        // This is acceptable — hooks are typically set just before spawn.
+        PreExecHooks { hooks: Vec::new() }
+    }
+}
+
+#[cfg(unix)]
+impl PartialEq for PreExecHooks {
+    fn eq(&self, other: &Self) -> bool {
+        self.hooks.len() == other.hooks.len()
+    }
+}
+
+#[cfg(unix)]
+impl std::fmt::Debug for PreExecHooks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreExecHooks")
+            .field("count", &self.hooks.len())
+            .finish()
+    }
 }
 
 impl CommandBuilder {
@@ -225,6 +262,8 @@ impl CommandBuilder {
             #[cfg(unix)]
             umask: None,
             controlling_tty: true,
+            #[cfg(unix)]
+            pre_exec_hooks: PreExecHooks::default(),
         }
     }
 
@@ -237,6 +276,8 @@ impl CommandBuilder {
             #[cfg(unix)]
             umask: None,
             controlling_tty: true,
+            #[cfg(unix)]
+            pre_exec_hooks: PreExecHooks::default(),
         }
     }
 
@@ -262,6 +303,8 @@ impl CommandBuilder {
             #[cfg(unix)]
             umask: None,
             controlling_tty: true,
+            #[cfg(unix)]
+            pre_exec_hooks: PreExecHooks::default(),
         }
     }
 
@@ -271,7 +314,12 @@ impl CommandBuilder {
     }
 
     /// Append an argument to the current command line.
-    /// Will panic if called on a builder created via `new_default_prog`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called on a builder created via [`new_default_prog`](Self::new_default_prog).
+    /// Use [`is_default_prog`](Self::is_default_prog) to check first, or create the
+    /// builder with [`new`](Self::new) instead.
     pub fn arg<S: AsRef<OsStr>>(&mut self, arg: S) {
         if self.is_default_prog() {
             panic!("attempted to add args to a default_prog builder");
@@ -280,6 +328,11 @@ impl CommandBuilder {
     }
 
     /// Set the actual program for a default_prog builder.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called on a builder that was NOT created via
+    /// [`new_default_prog`](Self::new_default_prog).
     pub fn replace_default_prog(&mut self, args: impl IntoIterator<Item = impl AsRef<OsStr>>) {
         if !self.is_default_prog() {
             panic!("attempted to replace_default_prog on a non-default_prog builder");
@@ -391,6 +444,23 @@ impl CommandBuilder {
 
 #[cfg(unix)]
 impl CommandBuilder {
+    /// Register a closure to be called in the child process after `fork()`
+    /// but before `exec()`.
+    ///
+    /// This is useful for operations like setting uid/gid, entering namespaces,
+    /// or adjusting resource limits. Multiple hooks are called in registration order.
+    ///
+    /// # Safety
+    ///
+    /// The closure runs in a forked-but-not-yet-exec'd child. You must only call
+    /// async-signal-safe functions. See `std::os::unix::process::CommandExt::pre_exec`.
+    pub unsafe fn pre_exec<F>(&mut self, hook: F)
+    where
+        F: FnMut() -> std::result::Result<(), std::io::Error> + Send + Sync + 'static,
+    {
+        self.pre_exec_hooks.hooks.push(Box::new(hook));
+    }
+
     pub fn umask(&mut self, mask: Option<libc::mode_t>) {
         self.umask = mask;
     }

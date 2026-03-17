@@ -23,11 +23,15 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
-const PSEUDOCONSOLE_INHERIT_CURSOR: u32 = 0x1;
-const PSEUDOCONSOLE_RESIZE_QUIRK: u32 = 0x2;
-const PSEUDOCONSOLE_WIN32_INPUT_MODE: u32 = 0x4;
-#[allow(dead_code)]
-const PSEUDOCONSOLE_PASSTHROUGH_MODE: u32 = 0x8;
+/// Flags for `CreatePseudoConsole`. Combine with bitwise OR.
+pub const PSEUDOCONSOLE_INHERIT_CURSOR: u32 = 0x1;
+pub const PSEUDOCONSOLE_RESIZE_QUIRK: u32 = 0x2;
+pub const PSEUDOCONSOLE_WIN32_INPUT_MODE: u32 = 0x4;
+pub const PSEUDOCONSOLE_PASSTHROUGH_MODE: u32 = 0x8;
+
+/// Default flags used by [`PseudoCon::new`].
+pub const DEFAULT_PSEUDOCONSOLE_FLAGS: u32 =
+    PSEUDOCONSOLE_INHERIT_CURSOR | PSEUDOCONSOLE_RESIZE_QUIRK | PSEUDOCONSOLE_WIN32_INPUT_MODE;
 
 /// Wrapper around a Windows PseudoConsole (ConPTY) handle.
 ///
@@ -49,16 +53,34 @@ impl Drop for PseudoCon {
 }
 
 impl PseudoCon {
+    /// Create a new PseudoConsole with [`DEFAULT_PSEUDOCONSOLE_FLAGS`].
     pub fn new(size: COORD, input: FileDescriptor, output: FileDescriptor) -> Result<Self> {
+        Self::new_with_flags(size, input, output, DEFAULT_PSEUDOCONSOLE_FLAGS)
+    }
+
+    /// Create a new PseudoConsole with explicit flags.
+    ///
+    /// Use [`DEFAULT_PSEUDOCONSOLE_FLAGS`] as a starting point and add/remove
+    /// flags as needed.  For example, to disable `PSEUDOCONSOLE_INHERIT_CURSOR`
+    /// (which can cause screen-clearing artifacts):
+    ///
+    /// ```ignore
+    /// let flags = DEFAULT_PSEUDOCONSOLE_FLAGS & !PSEUDOCONSOLE_INHERIT_CURSOR;
+    /// PseudoCon::new_with_flags(size, input, output, flags)?;
+    /// ```
+    pub fn new_with_flags(
+        size: COORD,
+        input: FileDescriptor,
+        output: FileDescriptor,
+        flags: u32,
+    ) -> Result<Self> {
         let mut con: HPCON = INVALID_HANDLE_VALUE as HPCON;
         let result = unsafe {
             CreatePseudoConsole(
                 size,
                 input.as_raw_handle() as isize,
                 output.as_raw_handle() as isize,
-                PSEUDOCONSOLE_INHERIT_CURSOR
-                    | PSEUDOCONSOLE_RESIZE_QUIRK
-                    | PSEUDOCONSOLE_WIN32_INPUT_MODE,
+                flags,
                 &mut con,
             )
         };

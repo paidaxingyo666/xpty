@@ -379,8 +379,19 @@ impl ChildKiller for std::process::Child {
 }
 
 /// Returns a `NativePtySystem` for the current platform.
+///
+/// If you need a trait object (e.g., for runtime dispatch or mock injection),
+/// use [`native_pty_system_boxed`] instead.
 pub fn native_pty_system() -> NativePtySystem {
     NativePtySystem::default()
+}
+
+/// Returns the native PTY system as a boxed trait object.
+///
+/// Useful when you need runtime polymorphism, e.g., swapping in a mock
+/// implementation for testing.
+pub fn native_pty_system_boxed() -> Box<dyn PtySystem + Send> {
+    Box::new(NativePtySystem::default())
 }
 
 #[cfg(unix)]

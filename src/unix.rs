@@ -198,11 +198,12 @@ impl PtyFd {
         })
     }
 
-    fn spawn_command(&self, builder: CommandBuilder) -> Result<std::process::Child> {
+    fn spawn_command(&self, mut builder: CommandBuilder) -> Result<std::process::Child> {
         let configured_umask = builder.umask;
+        let controlling_tty = builder.get_controlling_tty();
+        let mut user_hooks = std::mem::take(&mut builder.pre_exec_hooks.hooks);
 
         let mut cmd = builder.as_command()?;
-        let controlling_tty = builder.get_controlling_tty();
 
         unsafe {
             cmd.stdin(self.as_stdio()?)
@@ -238,6 +239,11 @@ impl PtyFd {
 
                     if let Some(mask) = configured_umask {
                         libc::umask(mask);
+                    }
+
+                    // Run user-supplied pre_exec hooks
+                    for hook in &mut user_hooks {
+                        hook()?;
                     }
 
                     Ok(())
