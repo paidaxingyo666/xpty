@@ -174,7 +174,7 @@ impl std::future::Future for WinChild {
                     // keep it alive, and store the raw value as usize to satisfy
                     // Send. WaitForSingleObject only reads the handle.
                     let handle_val = proc.as_raw_handle() as usize;
-                    struct SendProc(OwnedHandle);
+                    struct SendProc(#[allow(dead_code)] OwnedHandle);
                     unsafe impl Send for SendProc {}
                     let send_proc = SendProc(proc);
                     let waker = Arc::clone(&self.waker);

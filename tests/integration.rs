@@ -1,5 +1,25 @@
 use xpty::{CommandBuilder, PtySize, PtySystem};
 
+/// Helper: build a command that prints "hello" and exits.
+/// On Unix `echo` is a standalone binary; on Windows it's a cmd.exe builtin,
+/// so we need `cmd /C echo hello`.
+fn echo_hello() -> CommandBuilder {
+    #[cfg(unix)]
+    {
+        let mut cmd = CommandBuilder::new("echo");
+        cmd.arg("hello");
+        cmd
+    }
+    #[cfg(windows)]
+    {
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.arg("/C");
+        cmd.arg("echo");
+        cmd.arg("hello");
+        cmd
+    }
+}
+
 #[test]
 fn test_openpty() {
     let pty = xpty::native_pty_system();
@@ -29,11 +49,8 @@ fn test_spawn_and_wait() {
     let pty = xpty::native_pty_system();
     let pair = pty.openpty(PtySize::default()).unwrap();
 
-    let mut cmd = CommandBuilder::new("echo");
-    cmd.arg("hello");
-
+    let cmd = echo_hello();
     let mut child = pair.slave.spawn_command(cmd).unwrap();
-    // Drop slave so the child's pty side is the only reference
     drop(pair.slave);
     let status = child.wait().unwrap();
     assert!(status.success());
@@ -56,16 +73,13 @@ fn test_reader_writer() {
     let pty = xpty::native_pty_system();
     let pair = pty.openpty(PtySize::default()).unwrap();
 
-    let mut cmd = CommandBuilder::new("echo");
-    cmd.arg("hello");
-
+    let cmd = echo_hello();
     let mut child = pair.slave.spawn_command(cmd).unwrap();
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader().unwrap();
 
-    // Read some output (echo produces "hello\r\n" through the pty)
-    let mut buf = [0u8; 256];
+    let mut buf = [0u8; 4096];
     let n = reader.read(&mut buf).unwrap();
     assert!(n > 0);
     let output = String::from_utf8_lossy(&buf[..n]);
@@ -84,7 +98,6 @@ fn test_default_prog() {
 
     let mut child = pair.slave.spawn_command(cmd).unwrap();
 
-    // Kill it immediately since we don't want a shell sitting around
     xpty::ChildKiller::kill(&mut *child).ok();
     let _ = child.wait();
 }
@@ -121,7 +134,6 @@ fn test_process_group_leader() {
         })
         .unwrap();
 
-    // Give the child a moment to become session leader
     std::thread::sleep(std::time::Duration::from_millis(50));
 
     let pgl = pair.master.process_group_leader();
@@ -138,7 +150,6 @@ fn test_get_termios() {
     let pty = xpty::native_pty_system();
     let pair = pty.openpty(PtySize::default()).unwrap();
 
-    // Downcast to access the extension trait
     let master_ref: &dyn xpty::MasterPty = &*pair.master;
     let unix_master = master_ref
         .downcast_ref::<xpty::unix::UnixMasterPty>()
