@@ -1,8 +1,7 @@
 use xpty::{CommandBuilder, PtySize, PtySystem};
 
 /// Helper: build a command that prints "hello" and exits.
-/// On Unix `echo` is a standalone binary; on Windows it's a cmd.exe builtin,
-/// so we need `cmd /C echo hello`.
+/// On Unix `echo` is a standalone binary; on Windows it's a cmd.exe builtin.
 fn echo_hello() -> CommandBuilder {
     #[cfg(unix)]
     {
@@ -18,6 +17,25 @@ fn echo_hello() -> CommandBuilder {
         cmd.arg("hello");
         cmd
     }
+}
+
+/// Drain reader in background to prevent ConPTY pipe deadlock on Windows.
+/// ConPTY generates lots of VT sequences; if nobody reads the pipe, the child
+/// blocks on write and can never exit.
+fn drain_reader(reader: Box<dyn std::io::Read + Send>) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut reader = reader;
+        let mut output = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut reader, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => output.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+        output
+    })
 }
 
 #[test]
@@ -52,6 +70,12 @@ fn test_spawn_and_wait() {
     let cmd = echo_hello();
     let mut child = pair.slave.spawn_command(cmd).unwrap();
     drop(pair.slave);
+
+    // Must drain reader concurrently — on Windows, ConPTY generates VT
+    // sequences that fill the pipe buffer, blocking the child from exiting.
+    let reader = pair.master.try_clone_reader().unwrap();
+    let _drain = drain_reader(reader);
+
     let status = child.wait().unwrap();
     assert!(status.success());
 }
@@ -68,8 +92,6 @@ fn test_take_writer_twice_fails() {
 
 #[test]
 fn test_reader_writer() {
-    use std::io::Read;
-
     let pty = xpty::native_pty_system();
     let pair = pty.openpty(PtySize::default()).unwrap();
 
@@ -77,21 +99,15 @@ fn test_reader_writer() {
     let mut child = pair.slave.spawn_command(cmd).unwrap();
     drop(pair.slave);
 
-    let mut reader = pair.master.try_clone_reader().unwrap();
-
-    // Read in a background thread — the first read() will return
-    // the echo output before the child exits.
-    let reader_thread = std::thread::spawn(move || -> String {
-        let mut buf = [0u8; 4096];
-        match reader.read(&mut buf) {
-            Ok(n) if n > 0 => String::from_utf8_lossy(&buf[..n]).into_owned(),
-            _ => String::new(),
-        }
-    });
+    let reader = pair.master.try_clone_reader().unwrap();
+    let reader_handle = drain_reader(reader);
 
     child.wait().unwrap();
+    // Drop master to close ConPTY — this makes the reader see EOF.
+    drop(pair.master);
 
-    let text = reader_thread.join().expect("reader thread panicked");
+    let output = reader_handle.join().expect("reader thread panicked");
+    let text = String::from_utf8_lossy(&output);
     assert!(text.contains("hello"), "got: {text:?}");
 }
 
@@ -104,6 +120,10 @@ fn test_default_prog() {
     assert!(cmd.is_default_prog());
 
     let mut child = pair.slave.spawn_command(cmd).unwrap();
+
+    // Drain reader to avoid ConPTY pipe deadlock
+    let reader = pair.master.try_clone_reader().unwrap();
+    let _drain = drain_reader(reader);
 
     xpty::ChildKiller::kill(&mut *child).ok();
     let _ = child.wait();
