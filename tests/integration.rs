@@ -1,7 +1,6 @@
 use xpty::{CommandBuilder, PtySize, PtySystem};
 
 /// Helper: build a command that prints "hello" and exits.
-/// On Unix `echo` is a standalone binary; on Windows it's a cmd.exe builtin.
 fn echo_hello() -> CommandBuilder {
     #[cfg(unix)]
     {
@@ -20,8 +19,6 @@ fn echo_hello() -> CommandBuilder {
 }
 
 /// Drain reader in background to prevent ConPTY pipe deadlock on Windows.
-/// ConPTY generates lots of VT sequences; if nobody reads the pipe, the child
-/// blocks on write and can never exit.
 fn drain_reader(reader: Box<dyn std::io::Read + Send>) -> std::thread::JoinHandle<Vec<u8>> {
     std::thread::spawn(move || {
         let mut reader = reader;
@@ -36,6 +33,30 @@ fn drain_reader(reader: Box<dyn std::io::Read + Send>) -> std::thread::JoinHandl
         }
         output
     })
+}
+
+/// Wait for child with try_wait polling + timeout.
+/// WaitForSingleObject hangs on some Windows CI environments, so we
+/// poll with try_wait() instead.
+fn wait_for_child(
+    child: &mut Box<dyn xpty::Child + Send + Sync>,
+    timeout: std::time::Duration,
+) -> xpty::ExitStatus {
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status,
+            Ok(None) => {}
+            Err(e) => panic!("try_wait error: {e}"),
+        }
+        if start.elapsed() > timeout {
+            panic!(
+                "child did not exit within {:.0}s",
+                timeout.as_secs_f64()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 #[test]
@@ -71,12 +92,11 @@ fn test_spawn_and_wait() {
     let mut child = pair.slave.spawn_command(cmd).unwrap();
     drop(pair.slave);
 
-    // Must drain reader concurrently — on Windows, ConPTY generates VT
-    // sequences that fill the pipe buffer, blocking the child from exiting.
     let reader = pair.master.try_clone_reader().unwrap();
     let _drain = drain_reader(reader);
 
-    let status = child.wait().unwrap();
+    let timeout = std::time::Duration::from_secs(30);
+    let status = wait_for_child(&mut child, timeout);
     assert!(status.success());
 }
 
@@ -102,8 +122,10 @@ fn test_reader_writer() {
     let reader = pair.master.try_clone_reader().unwrap();
     let reader_handle = drain_reader(reader);
 
-    child.wait().unwrap();
-    // Drop master to close ConPTY — this makes the reader see EOF.
+    let timeout = std::time::Duration::from_secs(30);
+    let _status = wait_for_child(&mut child, timeout);
+
+    // Drop master to close ConPTY — reader sees EOF
     drop(pair.master);
 
     let output = reader_handle.join().expect("reader thread panicked");
@@ -121,12 +143,12 @@ fn test_default_prog() {
 
     let mut child = pair.slave.spawn_command(cmd).unwrap();
 
-    // Drain reader to avoid ConPTY pipe deadlock
     let reader = pair.master.try_clone_reader().unwrap();
     let _drain = drain_reader(reader);
 
     xpty::ChildKiller::kill(&mut *child).ok();
-    let _ = child.wait();
+    let timeout = std::time::Duration::from_secs(30);
+    let _ = wait_for_child(&mut child, timeout);
 }
 
 #[cfg(unix)]
