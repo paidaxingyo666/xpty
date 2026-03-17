@@ -1,7 +1,16 @@
 //! PseudoConsole (ConPTY) wrapper.
 //!
-//! Uses statically linked Windows API functions from `windows-sys`.
-//! Requires Windows 10 version 1809 (October 2018 Update) or later.
+//! ConPTY functions (`CreatePseudoConsole`, `ResizePseudoConsole`,
+//! `ClosePseudoConsole`) are loaded dynamically at runtime.  This allows
+//! applications to ship a sideloaded `conpty.dll` + `OpenConsole.exe`
+//! alongside the binary for a newer ConPTY implementation than the one
+//! bundled with the OS.
+//!
+//! Load order:
+//! 1. `conpty.dll` in the application directory (sideloaded)
+//! 2. `kernel32.dll` (system default, requires Windows 10 1809+)
+//!
+//! All other Win32 functions remain statically linked via `windows-sys`.
 
 use super::WinChild;
 use crate::cmdbuilder::CommandBuilder;
@@ -12,11 +21,10 @@ use std::ffi::OsString;
 use std::io::Error as IoError;
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
+use std::sync::OnceLock;
 use std::{mem, ptr};
 use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE, S_OK};
-use windows_sys::Win32::System::Console::{
-    ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
-};
+use windows_sys::Win32::System::Console::{COORD, HPCON};
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
     STARTF_USESTDHANDLES, STARTUPINFOEXW,
@@ -46,6 +54,65 @@ pub const PSEUDOCONSOLE_PASSTHROUGH_MODE: u32 = 0x8;
 pub const DEFAULT_PSEUDOCONSOLE_FLAGS: u32 =
     PSEUDOCONSOLE_RESIZE_QUIRK | PSEUDOCONSOLE_WIN32_INPUT_MODE;
 
+// --- Dynamic loading of ConPTY functions ---
+
+type CreatePseudoConsoleFn =
+    unsafe extern "system" fn(COORD, HANDLE, HANDLE, u32, *mut HPCON) -> i32;
+type ResizePseudoConsoleFn = unsafe extern "system" fn(HPCON, COORD) -> i32;
+type ClosePseudoConsoleFn = unsafe extern "system" fn(HPCON);
+
+struct ConPtyFuncs {
+    // Library must stay alive for the function pointers to remain valid
+    _lib: libloading::Library,
+    create: CreatePseudoConsoleFn,
+    resize: ResizePseudoConsoleFn,
+    close: ClosePseudoConsoleFn,
+}
+
+// SAFETY: The function pointers are from a loaded DLL and are valid for the
+// lifetime of _lib.  Windows DLL functions are safe to call from any thread.
+unsafe impl Send for ConPtyFuncs {}
+unsafe impl Sync for ConPtyFuncs {}
+
+fn try_load_from(dll: &str) -> std::result::Result<ConPtyFuncs, libloading::Error> {
+    unsafe {
+        let lib = libloading::Library::new(dll)?;
+        let create: libloading::Symbol<CreatePseudoConsoleFn> = lib.get(b"CreatePseudoConsole")?;
+        let resize: libloading::Symbol<ResizePseudoConsoleFn> = lib.get(b"ResizePseudoConsole")?;
+        let close: libloading::Symbol<ClosePseudoConsoleFn> = lib.get(b"ClosePseudoConsole")?;
+        Ok(ConPtyFuncs {
+            create: *create,
+            resize: *resize,
+            close: *close,
+            _lib: lib,
+        })
+    }
+}
+
+fn load_conpty() -> ConPtyFuncs {
+    // First verify the system supports ConPTY at all (kernel32.dll)
+    let kernel = try_load_from("kernel32.dll").expect(
+        "this system does not support ConPTY. Windows 10 October 2018 or newer is required",
+    );
+
+    // Prefer a sideloaded conpty.dll (ships newer ConPTY + OpenConsole.exe)
+    match try_load_from("conpty.dll") {
+        Ok(sideloaded) => {
+            log::info!("using sideloaded conpty.dll");
+            sideloaded
+        }
+        Err(_) => kernel,
+    }
+}
+
+static CONPTY: OnceLock<ConPtyFuncs> = OnceLock::new();
+
+fn conpty() -> &'static ConPtyFuncs {
+    CONPTY.get_or_init(load_conpty)
+}
+
+// --- PseudoCon ---
+
 /// Wrapper around a Windows PseudoConsole (ConPTY) handle.
 ///
 /// # Safety
@@ -61,7 +128,7 @@ unsafe impl Sync for PseudoCon {}
 
 impl Drop for PseudoCon {
     fn drop(&mut self) {
-        unsafe { ClosePseudoConsole(self.con) };
+        unsafe { (conpty().close)(self.con) };
     }
 }
 
@@ -89,7 +156,7 @@ impl PseudoCon {
     ) -> Result<Self> {
         let mut con: HPCON = INVALID_HANDLE_VALUE as HPCON;
         let result = unsafe {
-            CreatePseudoConsole(
+            (conpty().create)(
                 size,
                 input.as_raw_handle(),
                 output.as_raw_handle(),
@@ -104,7 +171,7 @@ impl PseudoCon {
     }
 
     pub fn resize(&self, size: COORD) -> Result<()> {
-        let result = unsafe { ResizePseudoConsole(self.con, size) };
+        let result = unsafe { (conpty().resize)(self.con, size) };
         if result != S_OK {
             return Err(Error::Hresult(result));
         }
@@ -158,7 +225,6 @@ impl PseudoCon {
             return Err(Error::other(msg));
         }
 
-        // Close the thread handle to avoid leaking it
         let _main_thread = unsafe { OwnedHandle::from_raw_handle(pi.hThread as *mut _) };
         let proc = unsafe { OwnedHandle::from_raw_handle(pi.hProcess as *mut _) };
 

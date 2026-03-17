@@ -1,6 +1,6 @@
 [package]
 name = "xpty"
-version = "0.3.5"
+version = "0.3.6"
 edition = "2021"
 rust-version = "1.70"
 authors = ["Wez Furlong", "Bruce Li"]
@@ -27,6 +27,7 @@ serde_support = ["serde"]
 serial = ["serial2"]
 
 [target."cfg(windows)".dependencies]
+libloading = "0.8"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
