@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use windows_sys::Win32::System::Threading::{
-    GetExitCodeProcess, GetProcessId, TerminateProcess, WaitForSingleObject, INFINITE,
+    GetExitCodeProcess, GetProcessId, TerminateProcess, WaitForSingleObject,
 };
 
 pub mod conpty;
@@ -35,14 +35,15 @@ impl WinChild {
         }
     }
 
+    /// Query process exit status without blocking.
+    /// Returns Ok(None) if still running, Ok(Some(status)) if exited.
+    /// Returns Err if the system call fails (e.g. invalid handle).
     fn is_complete(&mut self) -> IoResult<Option<ExitStatus>> {
         let mut status: u32 = 0;
         let proc = self
             .proc
             .lock()
-            .map_err(|e| IoError::other(e.to_string()))?
-            .try_clone()
-            .map_err(IoError::other)?;
+            .map_err(|e| IoError::other(e.to_string()))?;
         let res = unsafe { GetExitCodeProcess(proc.as_raw_handle(), &mut status) };
         if res != 0 {
             if status == STILL_ACTIVE {
@@ -51,7 +52,8 @@ impl WinChild {
                 Ok(Some(ExitStatus::with_exit_code(status)))
             }
         } else {
-            Ok(None)
+            // GetExitCodeProcess failed — surface the error
+            Err(IoError::last_os_error())
         }
     }
 
@@ -59,10 +61,7 @@ impl WinChild {
         let proc = self
             .proc
             .lock()
-            .map_err(|e| IoError::other(e.to_string()))?
-            .try_clone()
-            .map_err(IoError::other)?;
-        // TerminateProcess returns nonzero on SUCCESS
+            .map_err(|e| IoError::other(e.to_string()))?;
         let res = unsafe { TerminateProcess(proc.as_raw_handle(), 1) };
         if res == 0 {
             Err(IoError::last_os_error())
@@ -91,7 +90,6 @@ pub struct WinChildKiller {
 
 impl ChildKiller for WinChildKiller {
     fn kill(&mut self) -> IoResult<()> {
-        // TerminateProcess returns nonzero on SUCCESS
         let res = unsafe { TerminateProcess(self.proc.as_raw_handle(), 1) };
         if res == 0 {
             Err(IoError::last_os_error())
@@ -112,24 +110,29 @@ impl Child for WinChild {
     }
 
     fn wait(&mut self) -> IoResult<ExitStatus> {
-        if let Ok(Some(status)) = self.try_wait() {
+        // Fast path: already exited
+        if let Some(status) = self.try_wait()? {
             return Ok(status);
         }
-        let proc = self
-            .proc
-            .lock()
-            .map_err(|e| IoError::other(e.to_string()))?
-            .try_clone()
-            .map_err(IoError::other)?;
-        unsafe {
-            WaitForSingleObject(proc.as_raw_handle(), INFINITE);
-        }
-        let mut status: u32 = 0;
-        let res = unsafe { GetExitCodeProcess(proc.as_raw_handle(), &mut status) };
-        if res != 0 {
-            Ok(ExitStatus::with_exit_code(status))
-        } else {
-            Err(IoError::last_os_error())
+
+        // Use try_wait polling with WaitForSingleObject(100ms) as sleep.
+        // We avoid INFINITE because ConPTY can prevent WaitForSingleObject
+        // from ever returning in some configurations (the conhost process
+        // keeps a reference to the child's console, and certain pipe buffer
+        // states can deadlock).
+        loop {
+            {
+                let proc = self
+                    .proc
+                    .lock()
+                    .map_err(|e| IoError::other(e.to_string()))?;
+                unsafe {
+                    WaitForSingleObject(proc.as_raw_handle(), 100);
+                }
+            }
+            if let Some(status) = self.try_wait()? {
+                return Ok(status);
+            }
         }
     }
 
@@ -156,33 +159,35 @@ impl std::future::Future for WinChild {
             Ok(Some(status)) => Poll::Ready(Ok(status)),
             Err(err) => Poll::Ready(Err(crate::Error::Io(err))),
             Ok(None) => {
-                // Always update the waker so the latest task gets notified
                 *self.waker.lock().unwrap() = Some(cx.waker().clone());
 
-                // Only spawn the waiter thread once
                 if !self.wait_started.swap(true, Ordering::SeqCst) {
                     let proc = match self.proc.lock() {
                         Ok(p) => match p.try_clone() {
                             Ok(p) => p,
-                            Err(e) => return Poll::Ready(Err(crate::Error::Io(IoError::other(e)))),
+                            Err(e) => {
+                                return Poll::Ready(Err(crate::Error::Io(IoError::other(e))))
+                            }
                         },
                         Err(e) => return Poll::Ready(Err(crate::Error::other(e.to_string()))),
                     };
 
-                    // SAFETY: The HANDLE value is valid for the lifetime of
-                    // `proc` (OwnedHandle). We move `proc` into the thread to
-                    // keep it alive, and store the raw value as usize to satisfy
-                    // Send. WaitForSingleObject only reads the handle.
                     let handle_val = proc.as_raw_handle() as usize;
                     struct SendProc(#[allow(dead_code)] OwnedHandle);
                     unsafe impl Send for SendProc {}
                     let send_proc = SendProc(proc);
                     let waker = Arc::clone(&self.waker);
                     std::thread::spawn(move || {
-                        unsafe {
-                            WaitForSingleObject(handle_val as RawHandle, INFINITE);
+                        // Poll with short timeouts instead of INFINITE
+                        loop {
+                            let ret = unsafe {
+                                WaitForSingleObject(handle_val as RawHandle, 500)
+                            };
+                            // WAIT_OBJECT_0 (0) = signaled, WAIT_TIMEOUT (258) = retry
+                            if ret != 258 {
+                                break;
+                            }
                         }
-                        // Keep OwnedHandle alive until after wait completes
                         drop(send_proc);
                         if let Some(w) = waker.lock().unwrap().take() {
                             w.wake();
