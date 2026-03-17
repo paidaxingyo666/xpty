@@ -5,7 +5,6 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
-use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
 use windows_sys::Win32::System::Threading::{
     GetExitCodeProcess, GetProcessId, TerminateProcess, WaitForSingleObject, INFINITE,
 };

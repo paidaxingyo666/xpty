@@ -10,8 +10,8 @@ pub struct ConPtySystem {}
 
 impl PtySystem for ConPtySystem {
     fn openpty(&self, size: PtySize) -> Result<PtyPair> {
-        let stdin = Pipe::new().map_err(Error::Io)?;
-        let stdout = Pipe::new().map_err(Error::Io)?;
+        let stdin = Pipe::new()?;
+        let stdout = Pipe::new()?;
 
         let con = PseudoCon::new(
             COORD {
@@ -97,8 +97,7 @@ impl MasterPty for ConPtyMasterPty {
                 .lock()
                 .unwrap()
                 .readable
-                .try_clone()
-                .map_err(Error::Io)?,
+                .try_clone()?,
         ))
     }
 
