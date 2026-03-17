@@ -11,7 +11,6 @@
 //!
 //! ```no_run
 //! use xpty::{CommandBuilder, PtySize, native_pty_system, PtySystem};
-//! use anyhow::Error;
 //!
 //! // Use the native pty implementation for the system
 //! let pty_system = native_pty_system();
@@ -33,18 +32,11 @@
 //!
 //! // Send data to the pty by writing to the master
 //! writeln!(pair.master.take_writer()?, "ls -l\r\n")?;
-//! # Ok::<(), Error>(())
+//! # Ok::<(), xpty::Error>(())
 //! ```
 //!
-use anyhow::Error;
-use downcast_rs::{impl_downcast, Downcast};
-#[cfg(unix)]
-use libc;
-#[cfg(feature = "serde_support")]
-use serde::{Deserialize, Serialize};
-use std::io::Result as IoResult;
-#[cfg(windows)]
-use std::os::windows::prelude::{AsRawHandle, RawHandle};
+pub mod error;
+pub use error::{Error, Result};
 
 pub mod cmdbuilder;
 pub use cmdbuilder::CommandBuilder;
@@ -57,7 +49,12 @@ pub mod win;
 #[cfg(feature = "serial")]
 pub mod serial;
 
-/// Represents the size of the visible display area in the pty
+use downcast_rs::{impl_downcast, Downcast};
+#[cfg(feature = "serde_support")]
+use serde::{Deserialize, Serialize};
+use std::io::Result as IoResult;
+
+/// Represents the size of the visible display area in the pty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde_support", derive(Serialize, Deserialize))]
 pub struct PtySize {
@@ -84,71 +81,71 @@ impl Default for PtySize {
     }
 }
 
-/// Represents the master/control end of the pty
+/// Represents the master/control end of the pty.
+///
+/// All methods on this trait are cross-platform. Platform-specific
+/// extensions are available via [`MasterPtyExt`] (unix only).
 pub trait MasterPty: Downcast + Send {
     /// Inform the kernel and thus the child process that the window resized.
-    /// It will update the winsize information maintained by the kernel,
-    /// and generate a signal for the child to notice and update its state.
-    fn resize(&self, size: PtySize) -> Result<(), Error>;
-    /// Retrieves the size of the pty as known by the kernel
-    fn get_size(&self) -> Result<PtySize, Error>;
+    fn resize(&self, size: PtySize) -> Result<()>;
+    /// Retrieves the size of the pty as known by the kernel.
+    fn get_size(&self) -> Result<PtySize>;
     /// Obtain a readable handle; output from the slave(s) is readable
     /// via this stream.
-    fn try_clone_reader(&self) -> Result<Box<dyn std::io::Read + Send>, Error>;
+    fn try_clone_reader(&self) -> Result<Box<dyn std::io::Read + Send>>;
     /// Obtain a writable handle; writing to it will send data to the
-    /// slave end.
-    /// Dropping the writer will send EOF to the slave end.
+    /// slave end.  Dropping the writer will send EOF to the slave end.
     /// It is invalid to take the writer more than once.
-    fn take_writer(&self) -> Result<Box<dyn std::io::Write + Send>, Error>;
+    fn take_writer(&self) -> Result<Box<dyn std::io::Write + Send>>;
 
-    /// If applicable to the type of the tty, return the local process id
-    /// of the process group or session leader
-    #[cfg(unix)]
-    fn process_group_leader(&self) -> Option<libc::pid_t>;
+    /// If applicable, return the local process id of the process group
+    /// or session leader.  Returns `None` on non-Unix platforms.
+    fn process_group_leader(&self) -> Option<i32> {
+        None
+    }
 
-    /// If get_termios() and process_group_leader() are both implemented and
-    /// return Some, then as_raw_fd() should return the same underlying fd
-    /// associated with the stream. This is to enable applications that
-    /// "know things" to query similar information for themselves.
-    #[cfg(unix)]
-    fn as_raw_fd(&self) -> Option<unix::RawFd>;
+    /// If applicable, return the raw file descriptor of the master pty.
+    /// Returns `None` on non-Unix platforms.
+    fn as_raw_fd(&self) -> Option<i32> {
+        None
+    }
 
-    #[cfg(unix)]
-    fn tty_name(&self) -> Option<std::path::PathBuf>;
-
-    /// If applicable to the type of the tty, return the termios
-    /// associated with the stream
-    #[cfg(unix)]
-    fn get_termios(&self) -> Option<nix::sys::termios::Termios> {
+    /// Returns the TTY device name (e.g., `/dev/pts/0`).
+    /// Returns `None` on non-Unix platforms.
+    fn tty_name(&self) -> Option<std::path::PathBuf> {
         None
     }
 }
 impl_downcast!(MasterPty);
 
+/// Unix-specific extensions for [`MasterPty`].
+///
+/// Provides access to termios settings, which requires platform-specific types.
+#[cfg(unix)]
+pub trait MasterPtyExt {
+    /// If applicable, return the termios associated with the stream.
+    fn get_termios(&self) -> Option<nix::sys::termios::Termios> {
+        None
+    }
+}
+
 /// Represents a child process spawned into the pty.
-/// This handle can be used to wait for or terminate that child process.
 pub trait Child: std::fmt::Debug + ChildKiller + Downcast + Send {
-    /// Poll the child to see if it has completed.
-    /// Does not block.
-    /// Returns None if the child has not yet terminated,
-    /// else returns its exit status.
+    /// Poll the child to see if it has completed.  Does not block.
     fn try_wait(&mut self) -> IoResult<Option<ExitStatus>>;
-    /// Blocks execution until the child process has completed,
-    /// yielding its exit status.
+    /// Blocks execution until the child process has completed.
     fn wait(&mut self) -> IoResult<ExitStatus>;
-    /// Returns the process identifier of the child process,
-    /// if applicable
+    /// Returns the process identifier of the child process, if applicable.
     fn process_id(&self) -> Option<u32>;
-    /// Returns the process handle of the child process, if applicable.
-    /// Only available on Windows.
+    /// Returns the process handle of the child process (Windows only).
     #[cfg(windows)]
     fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle>;
 }
 impl_downcast!(Child);
 
-/// Represents the ability to signal a Child to terminate
+/// Represents the ability to signal a Child to terminate.
 pub trait ChildKiller: std::fmt::Debug + Downcast + Send {
-    /// Terminate the child process
+    /// Terminate the child process.
     fn kill(&mut self) -> IoResult<()>;
 
     /// Clone an object that can be split out from the Child in order
@@ -160,9 +157,9 @@ impl_downcast!(ChildKiller);
 
 /// Represents the slave side of a pty.
 /// Can be used to spawn processes into the pty.
-pub trait SlavePty {
-    /// Spawns the command specified by the provided CommandBuilder
-    fn spawn_command(&self, cmd: CommandBuilder) -> Result<Box<dyn Child + Send + Sync>, Error>;
+pub trait SlavePty: Send {
+    /// Spawns the command specified by the provided CommandBuilder.
+    fn spawn_command(&self, cmd: CommandBuilder) -> Result<Box<dyn Child + Send + Sync>>;
 }
 
 /// Represents the exit status of a child process.
@@ -173,12 +170,12 @@ pub struct ExitStatus {
 }
 
 impl ExitStatus {
-    /// Construct an ExitStatus from a process return code
+    /// Construct an ExitStatus from a process return code.
     pub fn with_exit_code(code: u32) -> Self {
         Self { code, signal: None }
     }
 
-    /// Construct an ExitStatus from a signal name
+    /// Construct an ExitStatus from a signal name.
     pub fn with_signal(signal: &str) -> Self {
         Self {
             code: 1,
@@ -186,20 +183,17 @@ impl ExitStatus {
         }
     }
 
-    /// Returns true if the status indicates successful completion
+    /// Returns true if the status indicates successful completion.
     pub fn success(&self) -> bool {
-        match self.signal {
-            None => self.code == 0,
-            Some(_) => false,
-        }
+        self.signal.is_none() && self.code == 0
     }
 
-    /// Returns the exit code that this ExitStatus was constructed with
+    /// Returns the exit code.
     pub fn exit_code(&self) -> u32 {
         self.code
     }
 
-    /// Returns the signal if present that this ExitStatus was constructed with
+    /// Returns the signal name if present.
     pub fn signal(&self) -> Option<&str> {
         self.signal.as_deref()
     }
@@ -250,30 +244,26 @@ impl std::fmt::Display for ExitStatus {
     }
 }
 
+/// A pair of master and slave PTY handles.
 pub struct PtyPair {
     // slave is listed first so that it is dropped first.
     // The drop order is stable and specified by rust rfc 1857
-    pub slave: Box<dyn SlavePty + Send>,
+    pub slave: Box<dyn SlavePty>,
     pub master: Box<dyn MasterPty + Send>,
 }
 
 /// The `PtySystem` trait allows an application to work with multiple
-/// possible Pty implementations at runtime.  This is important on
-/// Windows systems which have a variety of implementations.
+/// possible Pty implementations at runtime.
 pub trait PtySystem: Downcast {
     /// Create a new Pty instance with the window size set to the specified
-    /// dimensions.  Returns a (master, slave) Pty pair.  The master side
-    /// is used to drive the slave side.
-    fn openpty(&self, size: PtySize) -> anyhow::Result<PtyPair>;
+    /// dimensions.  Returns a (master, slave) Pty pair.
+    fn openpty(&self, size: PtySize) -> Result<PtyPair>;
 }
 impl_downcast!(PtySystem);
 
 impl Child for std::process::Child {
     fn try_wait(&mut self) -> IoResult<Option<ExitStatus>> {
-        std::process::Child::try_wait(self).map(|s| match s {
-            Some(s) => Some(s.into()),
-            None => None,
-        })
+        std::process::Child::try_wait(self).map(|s| s.map(Into::into))
     }
 
     fn wait(&mut self) -> IoResult<ExitStatus> {
@@ -302,9 +292,12 @@ struct ProcessSignaller {
 impl ChildKiller for ProcessSignaller {
     fn kill(&mut self) -> IoResult<()> {
         if let Some(handle) = &self.handle {
+            use std::os::windows::io::AsRawHandle;
             unsafe {
-                if winapi::um::processthreadsapi::TerminateProcess(handle.as_raw_handle() as _, 127)
-                    == 0
+                if windows_sys::Win32::System::Threading::TerminateProcess(
+                    handle.as_raw_handle() as isize,
+                    127,
+                ) == 0
                 {
                     return Err(std::io::Error::last_os_error());
                 }
@@ -341,32 +334,19 @@ impl ChildKiller for std::process::Child {
     fn kill(&mut self) -> IoResult<()> {
         #[cfg(unix)]
         {
-            // On unix, we send the SIGHUP signal instead of trying to kill
-            // the process. The default behavior of a process receiving this
-            // signal is to be killed unless it configured a signal handler.
             let result = unsafe { libc::kill(self.id() as i32, libc::SIGHUP) };
             if result != 0 {
                 return Err(std::io::Error::last_os_error());
             }
 
-            // We successfully delivered SIGHUP, but the semantics of Child::kill
-            // are that on success the process is dead or shortly about to
-            // terminate.  Since SIGUP doesn't guarantee termination, we
-            // give the process a bit of a grace period to shutdown or do whatever
-            // it is doing in its signal handler befre we proceed with the
-            // full on kill.
             for attempt in 0..5 {
                 if attempt > 0 {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
-
                 if let Ok(Some(_)) = self.try_wait() {
-                    // It completed, so report success!
                     return Ok(());
                 }
             }
-
-            // it's still alive after a grace period, so proceed with a kill
         }
 
         std::process::Child::kill(self)
@@ -374,9 +354,10 @@ impl ChildKiller for std::process::Child {
 
     #[cfg(windows)]
     fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
-        struct RawDup(RawHandle);
+        use std::os::windows::io::AsRawHandle;
+        struct RawDup(std::os::windows::io::RawHandle);
         impl AsRawHandle for RawDup {
-            fn as_raw_handle(&self) -> RawHandle {
+            fn as_raw_handle(&self) -> std::os::windows::io::RawHandle {
                 self.0
             }
         }
@@ -397,8 +378,9 @@ impl ChildKiller for std::process::Child {
     }
 }
 
-pub fn native_pty_system() -> Box<dyn PtySystem + Send> {
-    Box::new(NativePtySystem::default())
+/// Returns a `NativePtySystem` for the current platform.
+pub fn native_pty_system() -> NativePtySystem {
+    NativePtySystem::default()
 }
 
 #[cfg(unix)]

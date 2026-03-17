@@ -1,20 +1,19 @@
 use crate::cmdbuilder::CommandBuilder;
-use crate::win::psuedocon::PsuedoCon;
-use crate::{Child, MasterPty, PtyPair, PtySize, PtySystem, SlavePty};
-use anyhow::Error;
+use crate::win::pseudocon::PseudoCon;
+use crate::{Child, Error, MasterPty, PtyPair, PtySize, PtySystem, Result, SlavePty};
 use filedescriptor::{FileDescriptor, Pipe};
 use std::sync::{Arc, Mutex};
-use winapi::um::wincon::COORD;
+use windows_sys::Win32::System::Console::COORD;
 
 #[derive(Default)]
 pub struct ConPtySystem {}
 
 impl PtySystem for ConPtySystem {
-    fn openpty(&self, size: PtySize) -> anyhow::Result<PtyPair> {
-        let stdin = Pipe::new()?;
-        let stdout = Pipe::new()?;
+    fn openpty(&self, size: PtySize) -> Result<PtyPair> {
+        let stdin = Pipe::new().map_err(Error::Io)?;
+        let stdout = Pipe::new().map_err(Error::Io)?;
 
-        let con = PsuedoCon::new(
+        let con = PseudoCon::new(
             COORD {
                 X: size.cols as i16,
                 Y: size.rows as i16,
@@ -44,7 +43,7 @@ impl PtySystem for ConPtySystem {
 }
 
 struct Inner {
-    con: PsuedoCon,
+    con: PseudoCon,
     readable: FileDescriptor,
     writable: Option<FileDescriptor>,
     size: PtySize,
@@ -57,7 +56,7 @@ impl Inner {
         num_cols: u16,
         pixel_width: u16,
         pixel_height: u16,
-    ) -> Result<(), Error> {
+    ) -> Result<()> {
         self.con.resize(COORD {
             X: num_cols as i16,
             Y: num_rows as i16,
@@ -82,34 +81,41 @@ pub struct ConPtySlavePty {
 }
 
 impl MasterPty for ConPtyMasterPty {
-    fn resize(&self, size: PtySize) -> anyhow::Result<()> {
+    fn resize(&self, size: PtySize) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         inner.resize(size.rows, size.cols, size.pixel_width, size.pixel_height)
     }
 
-    fn get_size(&self) -> Result<PtySize, Error> {
+    fn get_size(&self) -> Result<PtySize> {
         let inner = self.inner.lock().unwrap();
-        Ok(inner.size.clone())
+        Ok(inner.size)
     }
 
-    fn try_clone_reader(&self) -> anyhow::Result<Box<dyn std::io::Read + Send>> {
-        Ok(Box::new(self.inner.lock().unwrap().readable.try_clone()?))
+    fn try_clone_reader(&self) -> Result<Box<dyn std::io::Read + Send>> {
+        Ok(Box::new(
+            self.inner
+                .lock()
+                .unwrap()
+                .readable
+                .try_clone()
+                .map_err(Error::Io)?,
+        ))
     }
 
-    fn take_writer(&self) -> anyhow::Result<Box<dyn std::io::Write + Send>> {
+    fn take_writer(&self) -> Result<Box<dyn std::io::Write + Send>> {
         Ok(Box::new(
             self.inner
                 .lock()
                 .unwrap()
                 .writable
                 .take()
-                .ok_or_else(|| anyhow::anyhow!("writer already taken"))?,
+                .ok_or(Error::WriterAlreadyTaken)?,
         ))
     }
 }
 
 impl SlavePty for ConPtySlavePty {
-    fn spawn_command(&self, cmd: CommandBuilder) -> anyhow::Result<Box<dyn Child + Send + Sync>> {
+    fn spawn_command(&self, cmd: CommandBuilder) -> Result<Box<dyn Child + Send + Sync>> {
         let inner = self.inner.lock().unwrap();
         let child = inner.con.spawn_command(cmd)?;
         Ok(Box::new(child))

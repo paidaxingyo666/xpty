@@ -1,32 +1,50 @@
 use crate::{Child, ChildKiller, ExitStatus};
-use anyhow::Context as _;
 use std::io::{Error as IoError, Result as IoResult};
 use std::os::windows::io::{AsRawHandle, RawHandle};
 use std::pin::Pin;
-use std::sync::Mutex;
-use std::task::{Context, Poll};
-use winapi::shared::minwindef::DWORD;
-use winapi::um::minwinbase::STILL_ACTIVE;
-use winapi::um::processthreadsapi::*;
-use winapi::um::synchapi::WaitForSingleObject;
-use winapi::um::winbase::INFINITE;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
+use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+use windows_sys::Win32::System::Threading::{
+    GetExitCodeProcess, GetProcessId, TerminateProcess, WaitForSingleObject, INFINITE,
+};
 
 pub mod conpty;
 mod procthreadattr;
-mod psuedocon;
+mod pseudocon;
 
 use filedescriptor::OwnedHandle;
+
+const STILL_ACTIVE: u32 = 259;
 
 #[derive(Debug)]
 pub struct WinChild {
     proc: Mutex<OwnedHandle>,
+    /// Shared waker for the Future impl, updated on each poll.
+    waker: Arc<Mutex<Option<Waker>>>,
+    /// Whether we already spawned a waiter thread.
+    wait_started: AtomicBool,
 }
 
 impl WinChild {
+    pub(crate) fn new(proc_handle: OwnedHandle) -> Self {
+        Self {
+            proc: Mutex::new(proc_handle),
+            waker: Arc::new(Mutex::new(None)),
+            wait_started: AtomicBool::new(false),
+        }
+    }
+
     fn is_complete(&mut self) -> IoResult<Option<ExitStatus>> {
-        let mut status: DWORD = 0;
-        let proc = self.proc.lock().unwrap().try_clone().unwrap();
-        let res = unsafe { GetExitCodeProcess(proc.as_raw_handle() as _, &mut status) };
+        let mut status: u32 = 0;
+        let proc = self
+            .proc
+            .lock()
+            .map_err(|e| IoError::other(e.to_string()))?
+            .try_clone()
+            .map_err(IoError::other)?;
+        let res = unsafe { GetExitCodeProcess(proc.as_raw_handle() as isize, &mut status) };
         if res != 0 {
             if status == STILL_ACTIVE {
                 Ok(None)
@@ -39,11 +57,16 @@ impl WinChild {
     }
 
     fn do_kill(&mut self) -> IoResult<()> {
-        let proc = self.proc.lock().unwrap().try_clone().unwrap();
-        let res = unsafe { TerminateProcess(proc.as_raw_handle() as _, 1) };
-        let err = IoError::last_os_error();
-        if res != 0 {
-            Err(err)
+        let proc = self
+            .proc
+            .lock()
+            .map_err(|e| IoError::other(e.to_string()))?
+            .try_clone()
+            .map_err(IoError::other)?;
+        // TerminateProcess returns nonzero on SUCCESS
+        let res = unsafe { TerminateProcess(proc.as_raw_handle() as isize, 1) };
+        if res == 0 {
+            Err(IoError::last_os_error())
         } else {
             Ok(())
         }
@@ -69,10 +92,10 @@ pub struct WinChildKiller {
 
 impl ChildKiller for WinChildKiller {
     fn kill(&mut self) -> IoResult<()> {
-        let res = unsafe { TerminateProcess(self.proc.as_raw_handle() as _, 1) };
-        let err = IoError::last_os_error();
-        if res != 0 {
-            Err(err)
+        // TerminateProcess returns nonzero on SUCCESS
+        let res = unsafe { TerminateProcess(self.proc.as_raw_handle() as isize, 1) };
+        if res == 0 {
+            Err(IoError::last_os_error())
         } else {
             Ok(())
         }
@@ -93,12 +116,17 @@ impl Child for WinChild {
         if let Ok(Some(status)) = self.try_wait() {
             return Ok(status);
         }
-        let proc = self.proc.lock().unwrap().try_clone().unwrap();
+        let proc = self
+            .proc
+            .lock()
+            .map_err(|e| IoError::other(e.to_string()))?
+            .try_clone()
+            .map_err(IoError::other)?;
         unsafe {
-            WaitForSingleObject(proc.as_raw_handle() as _, INFINITE);
+            WaitForSingleObject(proc.as_raw_handle() as isize, INFINITE);
         }
-        let mut status: DWORD = 0;
-        let res = unsafe { GetExitCodeProcess(proc.as_raw_handle() as _, &mut status) };
+        let mut status: u32 = 0;
+        let res = unsafe { GetExitCodeProcess(proc.as_raw_handle() as isize, &mut status) };
         if res != 0 {
             Ok(ExitStatus::with_exit_code(status))
         } else {
@@ -107,7 +135,8 @@ impl Child for WinChild {
     }
 
     fn process_id(&self) -> Option<u32> {
-        let res = unsafe { GetProcessId(self.proc.lock().unwrap().as_raw_handle() as _) };
+        let res =
+            unsafe { GetProcessId(self.proc.lock().unwrap().as_raw_handle() as isize) };
         if res == 0 {
             None
         } else {
@@ -115,33 +144,51 @@ impl Child for WinChild {
         }
     }
 
-    fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+    fn as_raw_handle(&self) -> Option<RawHandle> {
         let proc = self.proc.lock().unwrap();
         Some(proc.as_raw_handle())
     }
 }
 
 impl std::future::Future for WinChild {
-    type Output = anyhow::Result<ExitStatus>;
+    type Output = crate::Result<ExitStatus>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<anyhow::Result<ExitStatus>> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<crate::Result<ExitStatus>> {
         match self.is_complete() {
             Ok(Some(status)) => Poll::Ready(Ok(status)),
-            Err(err) => Poll::Ready(Err(err).context("Failed to retrieve process exit status")),
+            Err(err) => Poll::Ready(Err(crate::Error::Io(err))),
             Ok(None) => {
-                struct PassRawHandleToWaiterThread(pub RawHandle);
-                unsafe impl Send for PassRawHandleToWaiterThread {}
+                // Always update the waker so the latest task gets notified
+                *self.waker.lock().unwrap() = Some(cx.waker().clone());
 
-                let proc = self.proc.lock().unwrap().try_clone()?;
-                let handle = PassRawHandleToWaiterThread(proc.as_raw_handle());
+                // Only spawn the waiter thread once
+                if !self.wait_started.swap(true, Ordering::SeqCst) {
+                    let proc = match self.proc.lock() {
+                        Ok(p) => match p.try_clone() {
+                            Ok(p) => p,
+                            Err(e) => return Poll::Ready(Err(crate::Error::Io(IoError::other(e)))),
+                        },
+                        Err(e) => {
+                            return Poll::Ready(Err(crate::Error::other(e.to_string())))
+                        }
+                    };
 
-                let waker = cx.waker().clone();
-                std::thread::spawn(move || {
-                    unsafe {
-                        WaitForSingleObject(handle.0 as _, INFINITE);
-                    }
-                    waker.wake();
-                });
+                    // SAFETY: The HANDLE is valid for the lifetime of the OwnedHandle,
+                    // which we move into the thread. WaitForSingleObject only reads
+                    // the handle, and closing it after wait completes is safe.
+                    let raw_handle = proc.as_raw_handle() as isize;
+                    let waker = Arc::clone(&self.waker);
+                    std::thread::spawn(move || {
+                        unsafe {
+                            WaitForSingleObject(raw_handle, INFINITE);
+                        }
+                        // Keep proc alive until after wait completes
+                        drop(proc);
+                        if let Some(w) = waker.lock().unwrap().take() {
+                            w.wake();
+                        }
+                    });
+                }
                 Poll::Pending
             }
         }

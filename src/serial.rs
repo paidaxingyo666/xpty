@@ -1,15 +1,13 @@
-//! This module implements a serial port based tty.
-//! This is a bit different from the other implementations in that
-//! we cannot explicitly spawn a process into the serial connection,
-//! so we can only use a `CommandBuilder::new_default_prog` with the
-//! `openpty` method.
-//! On most (all?) systems, attempting to open multiple instances of
-//! the same serial port will fail.
+//! Serial port based TTY implementation.
+//!
+//! This is different from the other implementations in that we cannot
+//! explicitly spawn a process into the serial connection, so we can
+//! only use a `CommandBuilder::new_default_prog` with the `openpty` method.
+
 use crate::{
-    Child, ChildKiller, CommandBuilder, ExitStatus, MasterPty, PtyPair, PtySize, PtySystem,
-    SlavePty,
+    Child, ChildKiller, CommandBuilder, Error, ExitStatus, MasterPty, PtyPair, PtySize, PtySystem,
+    Result, SlavePty,
 };
-use anyhow::{ensure, Context};
 use filedescriptor::FileDescriptor;
 use serial2::{CharSize, FlowControl, Parity, SerialPort, StopBits};
 use std::cell::RefCell;
@@ -65,27 +63,25 @@ impl SerialTty {
 }
 
 impl PtySystem for SerialTty {
-    fn openpty(&self, _size: PtySize) -> anyhow::Result<PtyPair> {
-        let mut port = SerialPort::open(&self.port, self.baud)
-            .with_context(|| format!("openpty on serial port {:?}", self.port))?;
+    fn openpty(&self, _size: PtySize) -> Result<PtyPair> {
+        let mut port = SerialPort::open(&self.port, self.baud).map_err(|e| {
+            Error::other(format!("openpty on serial port {:?}: {}", self.port, e))
+        })?;
 
-        let mut settings = port.get_configuration()?;
+        let mut settings = port.get_configuration().map_err(Error::Io)?;
         settings.set_raw();
-        settings.set_baud_rate(self.baud)?;
+        settings.set_baud_rate(self.baud).map_err(Error::Io)?;
         settings.set_char_size(self.char_size);
         settings.set_flow_control(self.flow_control);
         settings.set_parity(self.parity);
         settings.set_stop_bits(self.stop_bits);
         log::debug!("serial settings: {:#?}", port.get_configuration());
-        port.set_configuration(&settings)?;
+        port.set_configuration(&settings).map_err(Error::Io)?;
 
-        // The timeout needs to be rather short because, at least on Windows,
-        // a read with a long timeout will block a concurrent write from
-        // happening.  In wezterm we tend to have a thread looping on read
-        // while writes happen occasionally from the gui thread, and if we
-        // make this timeout too long we can block the gui thread.
-        port.set_read_timeout(Duration::from_millis(50))?;
-        port.set_write_timeout(Duration::from_millis(50))?;
+        port.set_read_timeout(Duration::from_millis(50))
+            .map_err(Error::Io)?;
+        port.set_write_timeout(Duration::from_millis(50))
+            .map_err(Error::Io)?;
 
         let port: Handle = Arc::new(port);
 
@@ -106,26 +102,24 @@ struct Slave {
 }
 
 impl SlavePty for Slave {
-    fn spawn_command(&self, cmd: CommandBuilder) -> anyhow::Result<Box<dyn Child + Send + Sync>> {
-        ensure!(
-            cmd.is_default_prog(),
-            "can only use default prog commands with serial tty implementations"
-        );
+    fn spawn_command(&self, cmd: CommandBuilder) -> Result<Box<dyn Child + Send + Sync>> {
+        if !cmd.is_default_prog() {
+            return Err(Error::other(
+                "can only use default prog commands with serial tty implementations",
+            ));
+        }
         Ok(Box::new(SerialChild {
             port: Arc::clone(&self.port),
         }))
     }
 }
 
-/// There isn't really a child process on the end of the serial connection,
-/// so all of the Child trait impls are NOP
 struct SerialChild {
     port: Handle,
 }
 
-// An anemic impl of Debug to satisfy some indirect trait bounds
 impl std::fmt::Debug for SerialChild {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::result::Result<(), std::fmt::Error> {
         fmt.debug_struct("SerialChild").finish()
     }
 }
@@ -136,20 +130,10 @@ impl Child for SerialChild {
     }
 
     fn wait(&mut self) -> IoResult<ExitStatus> {
-        // There isn't really a child process to wait for,
-        // as the serial connection never really "dies",
-        // however, for something like a USB serial port,
-        // if it is unplugged then it logically is terminated.
-        // We read the CD (carrier detect) signal periodically
-        // to see if the device has gone away: we actually discard
-        // the CD value itself and just look for an error state.
-        // We could potentially also decide to call CD==false the
-        // same thing as the "child" completing.
         loop {
             std::thread::sleep(Duration::from_secs(5));
 
-            let port = &self.port;
-            if let Err(err) = port.read_cd() {
+            if let Err(err) = self.port.read_cd() {
                 log::error!("Error reading carrier detect: {:#}", err);
                 return Ok(ExitStatus::with_exit_code(1));
             }
@@ -199,56 +183,54 @@ struct MasterWriter {
 }
 
 impl Write for MasterWriter {
-    fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
+    fn write(&mut self, buf: &[u8]) -> std::result::Result<usize, std::io::Error> {
         self.port.write(buf)
     }
 
-    fn flush(&mut self) -> Result<(), std::io::Error> {
+    fn flush(&mut self) -> std::result::Result<(), std::io::Error> {
         self.port.flush()
     }
 }
 
 impl MasterPty for Master {
-    fn resize(&self, _size: PtySize) -> anyhow::Result<()> {
-        // Serial ports have no concept of size
+    fn resize(&self, _size: PtySize) -> Result<()> {
         Ok(())
     }
 
-    fn get_size(&self) -> anyhow::Result<PtySize> {
-        // Serial ports have no concept of size
+    fn get_size(&self) -> Result<PtySize> {
         Ok(PtySize::default())
     }
 
-    fn try_clone_reader(&self) -> anyhow::Result<Box<dyn std::io::Read + Send>> {
-        // We rely on the fact that SystemPort implements the traits
-        // that expose the underlying file descriptor, and that direct
-        // reads from that return the raw data that we want
+    fn try_clone_reader(&self) -> Result<Box<dyn Read + Send>> {
         let fd = FileDescriptor::dup(&*self.port)?;
         Ok(Box::new(Reader { fd }))
     }
 
-    fn take_writer(&self) -> anyhow::Result<Box<dyn std::io::Write + Send>> {
+    fn take_writer(&self) -> Result<Box<dyn Write + Send>> {
         if *self.took_writer.borrow() {
-            anyhow::bail!("cannot take writer more than once");
+            return Err(Error::WriterAlreadyTaken);
         }
         *self.took_writer.borrow_mut() = true;
         let port = Arc::clone(&self.port);
         Ok(Box::new(MasterWriter { port }))
     }
 
-    #[cfg(unix)]
-    fn process_group_leader(&self) -> Option<libc::pid_t> {
-        // N/A: there is no local process
+    fn process_group_leader(&self) -> Option<i32> {
         None
     }
 
-    #[cfg(unix)]
-    fn as_raw_fd(&self) -> Option<crate::unix::RawFd> {
+    fn as_raw_fd(&self) -> Option<i32> {
         None
     }
 
-    #[cfg(unix)]
     fn tty_name(&self) -> Option<PathBuf> {
+        None
+    }
+}
+
+#[cfg(unix)]
+impl crate::MasterPtyExt for Master {
+    fn get_termios(&self) -> Option<nix::sys::termios::Termios> {
         None
     }
 }
@@ -258,17 +240,11 @@ struct Reader {
 }
 
 impl Read for Reader {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
-        // On windows, this self.fd.read will block for up to the time we set
-        // as the timeout when we set up the port, but on unix it will
-        // never block.
+    fn read(&mut self, buf: &mut [u8]) -> std::result::Result<usize, std::io::Error> {
         loop {
             #[cfg(unix)]
             {
                 use filedescriptor::{poll, pollfd, AsRawSocketDescriptor, POLLIN};
-                // The serial crate puts the serial port in non-blocking mode,
-                // so we must explicitly poll for ourselves here to avoid a
-                // busy loop.
                 let mut poll_array = [pollfd {
                     fd: self.fd.as_socket_descriptor(),
                     events: POLLIN,
@@ -280,8 +256,6 @@ impl Read for Reader {
             match self.fd.read(buf) {
                 Ok(0) => {
                     if cfg!(windows) {
-                        // Read timeout with no data available yet;
-                        // loop and try again.
                         continue;
                     }
                     return Err(std::io::Error::new(
@@ -289,9 +263,7 @@ impl Read for Reader {
                         "EOF on serial port",
                     ));
                 }
-                Ok(size) => {
-                    return Ok(size);
-                }
+                Ok(size) => return Ok(size),
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::WouldBlock {
                         continue;
