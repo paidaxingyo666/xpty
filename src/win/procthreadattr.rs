@@ -3,8 +3,8 @@ use std::io::Error as IoError;
 use std::{mem, ptr};
 use windows_sys::Win32::System::Console::HPCON;
 use windows_sys::Win32::System::Threading::{
-    DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
-    UpdateProcThreadAttribute, LPPROC_THREAD_ATTRIBUTE_LIST,
+    DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
+    LPPROC_THREAD_ATTRIBUTE_LIST,
 };
 
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x00020016;

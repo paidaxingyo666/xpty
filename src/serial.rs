@@ -64,9 +64,8 @@ impl SerialTty {
 
 impl PtySystem for SerialTty {
     fn openpty(&self, _size: PtySize) -> Result<PtyPair> {
-        let mut port = SerialPort::open(&self.port, self.baud).map_err(|e| {
-            Error::other(format!("openpty on serial port {:?}: {}", self.port, e))
-        })?;
+        let mut port = SerialPort::open(&self.port, self.baud)
+            .map_err(|e| Error::other(format!("openpty on serial port {:?}: {}", self.port, e)))?;
 
         let mut settings = port.get_configuration().map_err(Error::Io)?;
         settings.set_raw();

@@ -1,6 +1,9 @@
 //! Working with pseudo-terminals on Unix
 
-use crate::{Child, CommandBuilder, Error, MasterPty, MasterPtyExt, PtyPair, PtySize, PtySystem, Result, SlavePty};
+use crate::{
+    Child, CommandBuilder, Error, MasterPty, MasterPtyExt, PtyPair, PtySize, PtySystem, Result,
+    SlavePty,
+};
 use filedescriptor::FileDescriptor;
 use libc::{self, winsize};
 use std::cell::RefCell;
@@ -229,9 +232,7 @@ impl PtyFd {
                     }
 
                     #[allow(clippy::cast_lossless)]
-                    if controlling_tty
-                        && libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1
-                    {
+                    if controlling_tty && libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
                         return Err(io::Error::last_os_error());
                     }
 
@@ -285,10 +286,7 @@ fn cloexec(fd: RawFd) -> Result<()> {
 }
 
 impl SlavePty for UnixSlavePty {
-    fn spawn_command(
-        &self,
-        builder: CommandBuilder,
-    ) -> Result<Box<dyn Child + Send + Sync>> {
+    fn spawn_command(&self, builder: CommandBuilder) -> Result<Box<dyn Child + Send + Sync>> {
         Ok(Box::new(self.fd.spawn_command(builder)?))
     }
 }

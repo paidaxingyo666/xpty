@@ -5,8 +5,8 @@
 
 use super::WinChild;
 use crate::cmdbuilder::CommandBuilder;
-use crate::win::procthreadattr::ProcThreadAttributeList;
 use crate::error::{Error, Result};
+use crate::win::procthreadattr::ProcThreadAttributeList;
 use filedescriptor::{FileDescriptor, OwnedHandle};
 use std::ffi::OsString;
 use std::io::Error as IoError;
@@ -18,8 +18,8 @@ use windows_sys::Win32::System::Console::{
     ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
-    PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    CreateProcessW, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
 /// Flags for `CreatePseudoConsole`. Combine with bitwise OR.

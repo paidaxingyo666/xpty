@@ -134,8 +134,7 @@ impl Child for WinChild {
     }
 
     fn process_id(&self) -> Option<u32> {
-        let res =
-            unsafe { GetProcessId(self.proc.lock().unwrap().as_raw_handle() as isize) };
+        let res = unsafe { GetProcessId(self.proc.lock().unwrap().as_raw_handle() as isize) };
         if res == 0 {
             None
         } else {
@@ -167,9 +166,7 @@ impl std::future::Future for WinChild {
                             Ok(p) => p,
                             Err(e) => return Poll::Ready(Err(crate::Error::Io(IoError::other(e)))),
                         },
-                        Err(e) => {
-                            return Poll::Ready(Err(crate::Error::other(e.to_string())))
-                        }
+                        Err(e) => return Poll::Ready(Err(crate::Error::other(e.to_string()))),
                     };
 
                     // SAFETY: The HANDLE is valid for the lifetime of the OwnedHandle,

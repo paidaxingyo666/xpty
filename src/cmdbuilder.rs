@@ -106,7 +106,9 @@ fn get_base_env() -> BTreeMap<OsString, EnvEntry> {
                 use winreg::types::FromRegValue;
                 use winreg::{RegKey, RegValue};
 
-                fn reg_value_to_string(value: &RegValue) -> std::result::Result<OsString, Box<dyn std::error::Error>> {
+                fn reg_value_to_string(
+                    value: &RegValue,
+                ) -> std::result::Result<OsString, Box<dyn std::error::Error>> {
                     match value.vtype {
                         RegType::REG_EXPAND_SZ => {
                             let src = unsafe {
@@ -160,9 +162,7 @@ fn get_base_env() -> BTreeMap<OsString, EnvEntry> {
                     }
                 }
 
-                if let Ok(sys_env) =
-                    RegKey::predef(HKEY_CURRENT_USER).open_subkey("Environment")
-                {
+                if let Ok(sys_env) = RegKey::predef(HKEY_CURRENT_USER).open_subkey("Environment") {
                     for res in sys_env.enum_values() {
                         if let Ok((name, value)) = res {
                             if let Ok(value) = reg_value_to_string(&value) {
@@ -223,7 +223,8 @@ pub struct CommandBuilder {
 #[cfg(unix)]
 #[derive(Default)]
 pub(crate) struct PreExecHooks {
-    pub(crate) hooks: Vec<Box<dyn FnMut() -> std::result::Result<(), std::io::Error> + Send + Sync>>,
+    pub(crate) hooks:
+        Vec<Box<dyn FnMut() -> std::result::Result<(), std::io::Error> + Send + Sync>>,
 }
 
 #[cfg(unix)]
@@ -631,7 +632,9 @@ impl CommandBuilder {
             use std::ffi::CStr;
             use std::str;
             let home = unsafe { CStr::from_ptr((*ent).pw_dir) };
-            home.to_str().map(str::to_owned).unwrap_or_else(|_| "/".into())
+            home.to_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|_| "/".into())
         }
     }
 }

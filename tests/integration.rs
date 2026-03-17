@@ -112,12 +112,14 @@ fn test_process_group_leader() {
     let pair = pty.openpty(PtySize::default()).unwrap();
 
     let cmd = CommandBuilder::new("sleep");
-    let mut child = pair.slave.spawn_command({
-        let mut c = cmd;
-        c.arg("0.1");
-        c
-    })
-    .unwrap();
+    let mut child = pair
+        .slave
+        .spawn_command({
+            let mut c = cmd;
+            c.arg("0.1");
+            c
+        })
+        .unwrap();
 
     // Give the child a moment to become session leader
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -164,10 +166,7 @@ fn test_command_builder_cwd() {
     assert!(cmd.get_cwd().is_none());
 
     cmd.cwd("/tmp");
-    assert_eq!(
-        cmd.get_cwd(),
-        Some(&std::ffi::OsString::from("/tmp"))
-    );
+    assert_eq!(cmd.get_cwd(), Some(&std::ffi::OsString::from("/tmp")));
 
     cmd.clear_cwd();
     assert!(cmd.get_cwd().is_none());
