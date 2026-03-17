@@ -295,7 +295,7 @@ impl ChildKiller for ProcessSignaller {
             use std::os::windows::io::AsRawHandle;
             unsafe {
                 if windows_sys::Win32::System::Threading::TerminateProcess(
-                    handle.as_raw_handle() as isize,
+                    handle.as_raw_handle(),
                     127,
                 ) == 0
                 {

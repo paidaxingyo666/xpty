@@ -77,8 +77,8 @@ impl PseudoCon {
         let result = unsafe {
             CreatePseudoConsole(
                 size,
-                input.as_raw_handle() as isize,
-                output.as_raw_handle() as isize,
+                input.as_raw_handle(),
+                output.as_raw_handle(),
                 flags,
                 &mut con,
             )
