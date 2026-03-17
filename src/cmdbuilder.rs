@@ -448,12 +448,41 @@ impl CommandBuilder {
     /// but before `exec()`.
     ///
     /// This is useful for operations like setting uid/gid, entering namespaces,
-    /// or adjusting resource limits. Multiple hooks are called in registration order.
+    /// or adjusting resource limits. Multiple hooks are called in registration order,
+    /// **after** xpty's own setup (signal reset, `setsid`, `TIOCSCTTY`, fd cleanup,
+    /// umask).
     ///
     /// # Safety
     ///
-    /// The closure runs in a forked-but-not-yet-exec'd child. You must only call
-    /// async-signal-safe functions. See `std::os::unix::process::CommandExt::pre_exec`.
+    /// The closure executes in a forked-but-not-yet-exec'd child process.
+    /// At this point the child is a single-threaded copy of a potentially
+    /// multi-threaded parent, so **only async-signal-safe functions may be
+    /// called** (POSIX.1-2008 §2.4.3).
+    ///
+    /// ## What is safe
+    ///
+    /// - Raw syscalls and libc wrappers documented as async-signal-safe:
+    ///   `setsid`, `setuid`, `setgid`, `dup2`, `close`, `ioctl`, `chroot`,
+    ///   `chdir`, `umask`, `write` (to an fd, not `std::io::Write`), etc.
+    /// - Reading/writing to memory that was set up before `fork()`.
+    ///
+    /// ## What is NOT safe
+    ///
+    /// - **Heap allocation** (`malloc` / `Box::new` / `Vec::push` / `String`
+    ///   formatting) — the allocator may hold a lock from another thread that
+    ///   was not forked.
+    /// - **Acquiring any lock** (`Mutex`, `RwLock`, `println!`) — same reason.
+    /// - **Anything in `std::io`** that allocates or locks internally
+    ///   (e.g., `BufWriter`, `stdout()`).
+    /// - **Calling non-async-signal-safe libc functions** such as `getpwnam`,
+    ///   `dlopen`, `openlog`.
+    ///
+    /// Violating these constraints leads to undefined behavior — typically
+    /// a deadlock in the child that is extremely hard to diagnose.
+    ///
+    /// For the full list of async-signal-safe functions see
+    /// [`signal-safety(7)`](https://man7.org/linux/man-pages/man7/signal-safety.7.html)
+    /// and [`std::os::unix::process::CommandExt::pre_exec`].
     pub unsafe fn pre_exec<F>(&mut self, hook: F)
     where
         F: FnMut() -> std::result::Result<(), std::io::Error> + Send + Sync + 'static,
