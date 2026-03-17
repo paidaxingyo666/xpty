@@ -23,9 +23,16 @@ use windows_sys::Win32::System::Threading::{
 };
 
 /// Flags for `CreatePseudoConsole`. Combine with bitwise OR.
+///
+/// These are part of the public API for downstream callers to customize
+/// ConPTY behavior via [`PseudoCon::new_with_flags`].
+#[allow(dead_code)]
 pub const PSEUDOCONSOLE_INHERIT_CURSOR: u32 = 0x1;
+#[allow(dead_code)]
 pub const PSEUDOCONSOLE_RESIZE_QUIRK: u32 = 0x2;
+#[allow(dead_code)]
 pub const PSEUDOCONSOLE_WIN32_INPUT_MODE: u32 = 0x4;
+#[allow(dead_code)]
 pub const PSEUDOCONSOLE_PASSTHROUGH_MODE: u32 = 0x8;
 
 /// Default flags used by [`PseudoCon::new`].

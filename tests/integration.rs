@@ -79,13 +79,20 @@ fn test_reader_writer() {
 
     let mut reader = pair.master.try_clone_reader().unwrap();
 
-    let mut buf = [0u8; 4096];
-    let n = reader.read(&mut buf).unwrap();
-    assert!(n > 0);
-    let output = String::from_utf8_lossy(&buf[..n]);
-    assert!(output.contains("hello"), "got: {output:?}");
+    // Read in a background thread — the first read() will return
+    // the echo output before the child exits.
+    let reader_thread = std::thread::spawn(move || -> String {
+        let mut buf = [0u8; 4096];
+        match reader.read(&mut buf) {
+            Ok(n) if n > 0 => String::from_utf8_lossy(&buf[..n]).into_owned(),
+            _ => String::new(),
+        }
+    });
 
     child.wait().unwrap();
+
+    let text = reader_thread.join().expect("reader thread panicked");
+    assert!(text.contains("hello"), "got: {text:?}");
 }
 
 #[test]
