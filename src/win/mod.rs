@@ -169,19 +169,21 @@ impl std::future::Future for WinChild {
                         Err(e) => return Poll::Ready(Err(crate::Error::other(e.to_string()))),
                     };
 
-                    // SAFETY: The HANDLE is valid for the lifetime of the OwnedHandle,
-                    // which we move into the thread. WaitForSingleObject only reads
-                    // the handle, and closing it after wait completes is safe.
-                    struct SendHandle(RawHandle);
-                    unsafe impl Send for SendHandle {}
-                    let handle = SendHandle(proc.as_raw_handle());
+                    // SAFETY: The HANDLE value is valid for the lifetime of
+                    // `proc` (OwnedHandle). We move `proc` into the thread to
+                    // keep it alive, and store the raw value as usize to satisfy
+                    // Send. WaitForSingleObject only reads the handle.
+                    let handle_val = proc.as_raw_handle() as usize;
+                    struct SendProc(OwnedHandle);
+                    unsafe impl Send for SendProc {}
+                    let send_proc = SendProc(proc);
                     let waker = Arc::clone(&self.waker);
                     std::thread::spawn(move || {
                         unsafe {
-                            WaitForSingleObject(handle.0, INFINITE);
+                            WaitForSingleObject(handle_val as RawHandle, INFINITE);
                         }
-                        // Keep proc alive until after wait completes
-                        drop(proc);
+                        // Keep OwnedHandle alive until after wait completes
+                        drop(send_proc);
                         if let Some(w) = waker.lock().unwrap().take() {
                             w.wake();
                         }
