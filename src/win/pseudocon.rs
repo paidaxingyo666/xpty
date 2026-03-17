@@ -36,8 +36,15 @@ pub const PSEUDOCONSOLE_WIN32_INPUT_MODE: u32 = 0x4;
 pub const PSEUDOCONSOLE_PASSTHROUGH_MODE: u32 = 0x8;
 
 /// Default flags used by [`PseudoCon::new`].
+///
+/// Does NOT include `PSEUDOCONSOLE_INHERIT_CURSOR` because it causes conhost
+/// to send a `\x1b[6n` (Device Status Report) cursor query and block until the
+/// client responds with `\x1b[row;colR` on the input pipe.  Most PTY consumers
+/// never reply to DSR, which deadlocks the entire session.  Add the flag
+/// explicitly via [`PseudoCon::new_with_flags`] if cursor inheritance is needed
+/// and your code handles DSR responses.
 pub const DEFAULT_PSEUDOCONSOLE_FLAGS: u32 =
-    PSEUDOCONSOLE_INHERIT_CURSOR | PSEUDOCONSOLE_RESIZE_QUIRK | PSEUDOCONSOLE_WIN32_INPUT_MODE;
+    PSEUDOCONSOLE_RESIZE_QUIRK | PSEUDOCONSOLE_WIN32_INPUT_MODE;
 
 /// Wrapper around a Windows PseudoConsole (ConPTY) handle.
 ///

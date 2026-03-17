@@ -54,16 +54,6 @@ fn wait_for_child(
     }
 }
 
-/// Close writer after a delay in a background thread.
-/// On Windows, ConPTY needs the input pipe closed for the child to exit,
-/// but closing it immediately kills the child before it runs the command.
-fn close_writer_delayed(writer: Box<dyn std::io::Write + Send>, delay: std::time::Duration) {
-    std::thread::spawn(move || {
-        std::thread::sleep(delay);
-        drop(writer);
-    });
-}
-
 #[test]
 fn test_openpty() {
     let pty = xpty::native_pty_system();
@@ -94,18 +84,12 @@ fn test_spawn_and_wait() {
     let pair = pty.openpty(PtySize::default()).unwrap();
 
     let cmd = echo_hello();
-
-    let reader = pair.master.try_clone_reader().unwrap();
-    let writer = pair.master.take_writer().unwrap();
-
     let mut child = pair.slave.spawn_command(cmd).unwrap();
     drop(pair.slave);
 
+    // Drain reader to prevent pipe buffer deadlock
+    let reader = pair.master.try_clone_reader().unwrap();
     let _drain = drain_reader(reader);
-
-    // On Windows, ConPTY needs writer closed for child to exit, but closing
-    // immediately kills the child before it runs the command. Delay 2s.
-    close_writer_delayed(writer, std::time::Duration::from_secs(2));
 
     let timeout = std::time::Duration::from_secs(30);
     let status = wait_for_child(&mut child, timeout);
@@ -128,17 +112,11 @@ fn test_reader_writer() {
     let pair = pty.openpty(PtySize::default()).unwrap();
 
     let cmd = echo_hello();
-
-    let reader = pair.master.try_clone_reader().unwrap();
-    let writer = pair.master.take_writer().unwrap();
-
     let mut child = pair.slave.spawn_command(cmd).unwrap();
     drop(pair.slave);
 
+    let reader = pair.master.try_clone_reader().unwrap();
     let reader_handle = drain_reader(reader);
-
-    // Delay writer close to give cmd.exe time to run "echo hello"
-    close_writer_delayed(writer, std::time::Duration::from_secs(2));
 
     let timeout = std::time::Duration::from_secs(30);
     let _status = wait_for_child(&mut child, timeout);
