@@ -54,6 +54,16 @@ fn wait_for_child(
     }
 }
 
+/// Close writer after a delay in a background thread.
+/// On Windows, ConPTY needs the input pipe closed for the child to exit,
+/// but closing it immediately kills the child before it runs the command.
+fn close_writer_delayed(writer: Box<dyn std::io::Write + Send>, delay: std::time::Duration) {
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        drop(writer);
+    });
+}
+
 #[test]
 fn test_openpty() {
     let pty = xpty::native_pty_system();
@@ -85,18 +95,17 @@ fn test_spawn_and_wait() {
 
     let cmd = echo_hello();
 
-    // Get reader/writer BEFORE spawn — on Windows, ConPTY needs the
-    // input pipe to be closed for the child to proceed to exit.
     let reader = pair.master.try_clone_reader().unwrap();
     let writer = pair.master.take_writer().unwrap();
 
     let mut child = pair.slave.spawn_command(cmd).unwrap();
     drop(pair.slave);
 
-    // Close the writer (input pipe) — unblocks ConPTY output processing.
-    drop(writer);
-
     let _drain = drain_reader(reader);
+
+    // On Windows, ConPTY needs writer closed for child to exit, but closing
+    // immediately kills the child before it runs the command. Delay 2s.
+    close_writer_delayed(writer, std::time::Duration::from_secs(2));
 
     let timeout = std::time::Duration::from_secs(30);
     let status = wait_for_child(&mut child, timeout);
@@ -126,10 +135,10 @@ fn test_reader_writer() {
     let mut child = pair.slave.spawn_command(cmd).unwrap();
     drop(pair.slave);
 
-    // Close writer to unblock ConPTY
-    drop(writer);
-
     let reader_handle = drain_reader(reader);
+
+    // Delay writer close to give cmd.exe time to run "echo hello"
+    close_writer_delayed(writer, std::time::Duration::from_secs(2));
 
     let timeout = std::time::Duration::from_secs(30);
     let _status = wait_for_child(&mut child, timeout);
@@ -187,17 +196,24 @@ fn test_process_group_leader() {
         .slave
         .spawn_command({
             let mut c = cmd;
-            c.arg("0.1");
+            c.arg("2");
             c
         })
         .unwrap();
 
-    std::thread::sleep(std::time::Duration::from_millis(50));
-
-    let pgl = pair.master.process_group_leader();
+    // Retry — child needs time to setsid + TIOCSCTTY
+    let mut pgl = None;
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        pgl = pair.master.process_group_leader();
+        if pgl.is_some() {
+            break;
+        }
+    }
     assert!(pgl.is_some(), "expected a process group leader");
 
-    child.wait().unwrap();
+    xpty::ChildKiller::kill(&mut *child).ok();
+    let _ = child.wait();
 }
 
 #[cfg(unix)]
