@@ -1,40 +1,54 @@
-# Wez's Terminal
+# xpty
 
-<img height="128" alt="WezTerm Icon" src="https://raw.githubusercontent.com/wezterm/wezterm/main/assets/icon/wezterm-icon.svg" align="left"> *A GPU-accelerated cross-platform terminal emulator and multiplexer written by <a href="https://github.com/wez">@wez</a> and implemented in <a href="https://www.rust-lang.org/">Rust</a>*
+Cross-platform async-ready PTY (pseudo terminal) interface for Rust.
 
-User facing docs and guide at: https://wezterm.org/
+Forked from [portable-pty](https://github.com/wezterm/wezterm/tree/main/pty) (part of [wezterm](https://github.com/wezterm/wezterm)) by Wez Furlong.
 
-![Screenshot](docs/screenshots/two.png)
+## Features
 
-*Screenshot of wezterm on macOS, running vim*
+- **Cross-platform**: Unix (openpty) and Windows (ConPTY) support
+- **Trait-based**: Runtime selection of PTY implementations via `PtySystem` trait
+- **Serial port support**: Optional serial port TTY via `serial` feature
 
-## Installation
+## Usage
 
-https://wezterm.org/installation
+```rust
+use xpty::{CommandBuilder, PtySize, native_pty_system, PtySystem};
 
-## Getting help
+let pty_system = native_pty_system();
 
-This is a spare time project, so please bear with me.  There are a couple of channels for support:
+let mut pair = pty_system.openpty(PtySize {
+    rows: 24,
+    cols: 80,
+    pixel_width: 0,
+    pixel_height: 0,
+})?;
 
-* You can use the [GitHub issue tracker](https://github.com/wezterm/wezterm/issues) to see if someone else has a similar issue, or to file a new one.
-* Start or join a thread in our [GitHub Discussions](https://github.com/wezterm/wezterm/discussions); if you have general
-  questions or want to chat with other wezterm users, you're welcome here!
-* There is a [Matrix room via Element.io](https://app.element.io/#/room/#wezterm:matrix.org)
-  for (potentially!) real time discussions.
+let cmd = CommandBuilder::new("bash");
+let child = pair.slave.spawn_command(cmd)?;
 
-The GitHub Discussions and Element/Gitter rooms are better suited for questions
-than bug reports, but don't be afraid to use whichever you are most comfortable
-using and we'll work it out.
+let mut reader = pair.master.try_clone_reader()?;
+writeln!(pair.master.take_writer()?, "ls -l\r\n")?;
+```
 
-## Supporting the Project
+## Optional Features
 
-If you use and like WezTerm, please consider sponsoring it: your support helps
-to cover the fees required to maintain the project and to validate the time
-spent working on it!
+| Feature | Description |
+|---------|-------------|
+| `serial` | Serial port TTY support via `serial2` |
+| `serde_support` | Serde serialization for `PtySize` and `CommandBuilder` |
 
-[Read more about sponsoring](https://wezterm.org/sponsor.html).
+## Relationship to portable-pty
 
-* [![Sponsor WezTerm](https://img.shields.io/github/sponsors/wez?label=Sponsor%20WezTerm&logo=github&style=for-the-badge)](https://github.com/sponsors/wez)
-* [Patreon](https://patreon.com/WezFurlong)
-* [Ko-Fi](https://ko-fi.com/wezfurlong)
-* [Liberapay](https://liberapay.com/wez)
+xpty is a fork of portable-pty 0.9.0 with the goal of becoming a more modern, independent cross-platform PTY library. Planned improvements include:
+
+- Async support (tokio/async-std)
+- Better Windows ConPTY control
+- Improved error types
+- Modern Rust idioms (edition 2021+)
+
+## License
+
+MIT - see [LICENSE.md](LICENSE.md)
+
+Original code by Wez Furlong. See the git history for full attribution.
